@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>QUANTUM MATRIX CORE</title>
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <style>
+    :root {
+      --bg: #0a0e17;
+      --panel: #111927;
+      --accent: #00ffcc;
+      --danger: #ff0055;
+      --text: #c0d1eb;
+      --dim: #4a5d78;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Courier New', monospace; }
+    body { background: var(--bg); color: var(--text); padding: 16px; display: flex; flex-direction: column; gap: 16px; min-height: 100vh; }
+    .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--dim); padding-bottom: 12px; }
+    h1 { font-size: 1.2rem; letter-spacing: 2px; color: var(--accent); }
+    .status-badge { padding: 4px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: bold; background: #222; border: 1px solid var(--dim); }
+    .status-badge.online { color: var(--accent); border-color: var(--accent); }
+    .status-badge.cold { color: var(--danger); border-color: var(--danger); }
+
+    .control-bar { display: flex; flex-wrap: wrap; gap: 8px; background: var(--panel); padding: 12px; border-radius: 6px; }
+    select, input, button {
+      background: #060a12; border: 1px solid var(--dim); color: var(--text);
+      padding: 8px 12px; font-size: 0.9rem; border-radius: 4px; outline: none;
+    }
+    select:focus, input:focus { border-color: var(--accent); }
+    button { background: var(--accent); color: #000; font-weight: bold; cursor: pointer; border: none; }
+    button:active { filter: brightness(0.8); }
+
+    .viewport-container { position: relative; background: #000; border-radius: 6px; overflow: hidden; min-height: 240px; display: flex; align-items: center; justify-content: center; }
+    video { width: 100%; max-height: 50vh; object-fit: contain; }
+
+    .telemetry-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; }
+    .telemetry-card { background: var(--panel); padding: 10px; border-radius: 4px; border-left: 2px solid var(--accent); }
+    .telemetry-card .label { font-size: 0.7rem; color: var(--dim); text-transform: uppercase; }
+    .telemetry-card .val { font-size: 1.1rem; color: #fff; margin-top: 4px; }
+
+    .logs-panel { background: var(--panel); border-radius: 6px; padding: 12px; font-size: 0.8rem; }
+    .logs-panel .stats { display: flex; gap: 16px; margin-bottom: 8px; color: var(--accent); }
+    .log-terminal { background: #05080f; padding: 8px; border-radius: 4px; height: 120px; overflow-y: auto; color: #7f93ad; }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+    <h1>QUANTUM MATRIX CORE</h1>
+    <div id="sysStatus" class="status-badge cold">SYSTEM COLD</div>
+  </div>
+
+  <div class="control-bar">
+    <select id="modeSelect">
+      <option value="view-mode">TABLET CONSOLE: Live Stream Monitor</option>
+      <option value="send-mode">TARGET PHONE: Broadcast Live Feed</option>
+    </select>
+    <input type="text" id="roomId" placeholder="Channel / Room ID" value="matrix-channel-1">
+    <button id="actionBtn">INITIALIZE</button>
+    <button id="unmuteBtn" style="display:none; background:#ffaa00;">ENABLE AUDIO</button>
+  </div>
+
+  <div class="viewport-container">
+    <video id="mediaPlayer" autoplay playsinline muted></video>
+  </div>
+
+  <div class="telemetry-grid">
+    <div class="telemetry-card"><div class="label">Latitude</div><div class="val" id="latVal">--.-----</div></div>
+    <div class="telemetry-card"><div class="label">Longitude</div><div class="val" id="lonVal">--.-----</div></div>
+    <div class="telemetry-card"><div class="label">Total Distance</div><div class="val" id="distVal">0.000 km</div></div>
+    <div class="telemetry-card"><div class="label">Velocity</div><div class="val" id="speedVal">0.0 km/h</div></div>
+    <div class="telemetry-card"><div class="label">Heading</div><div class="val" id="headVal">--°</div></div>
+    <div class="telemetry-card"><div class="label">Altitude</div><div class="val" id="altVal">-- m</div></div>
+  </div>
+
+  <div class="logs-panel">
+    <div class="stats">
+      <div>ICE State: <span id="iceState">DISCONNECTED</span></div>
+      <div>Packets: <span id="packetCount">0</span></div>
+    </div>
+    <div class="log-terminal" id="logTerminal"></div>
+  </div>
+
+  <script>
+    let peer = null;
+    let localStream = null;
+    let dataConn = null;
+    let totalDistKm = 0;
+    let lastCoords = null;
+    let packetCounter = 0;
+
+    const sysStatus = document.getElementById('sysStatus');
+    const modeSelect = document.getElementById('modeSelect');
+    const roomIdInput = document.getElementById('roomId');
+    const actionBtn = document.getElementById('actionBtn');
+    const unmuteBtn = document.getElementById('unmuteBtn');
+    const mediaPlayer = document.getElementById('mediaPlayer');
+    const logTerminal = document.getElementById('logTerminal');
+    const iceState = document.getElementById('iceState');
+    const packetCount = document.getElementById('packetCount');
+
+    function log(msg) {
+      const line = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      logTerminal.innerHTML += `<div>${line}</div>`;
+      logTerminal.scrollTop = logTerminal.scrollHeight;
+    }
+
+    function calculateDistance(lat1, lon1, lat2, lon2) {
+      const R = 6371;
+      const dLat = (lat2 - lat1) * Math.PI / 180;
+      const dLon = (lon2 - lon1) * Math.PI / 180;
+      const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180) * Math.cos(lat2*Math.PI/180) * Math.sin(dLon/2)**2;
+      return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    }
+
+    function updateTelemetryUI(data) {
+      document.getElementById('latVal').textContent = data.lat?.toFixed(5) ?? '--.-----';
+      document.getElementById('lonVal').textContent = data.lon?.toFixed(5) ?? '--.-----';
+      document.getElementById('distVal').textContent = `${data.dist?.toFixed(3) ?? '0.000'} km`;
+      document.getElementById('speedVal').textContent = `${data.speed ? (data.speed * 3.6).toFixed(1) : '0.0'} km/h`;
+      document.getElementById('headVal').textContent = data.heading ? `${Math.round(data.heading)}°` : '--°';
+      document.getElementById('altVal').textContent = data.alt ? `${Math.round(data.alt)} m` : '-- m';
+    }
+
+    actionBtn.addEventListener('click', async () => {
+      const mode = modeSelect.value;
+      const room = roomIdInput.value.trim();
+      if (!room) return alert('Enter a Channel / Room ID');
+
+      actionBtn.disabled = true;
+      sysStatus.className = 'status-badge';
+      sysStatus.textContent = 'CONNECTING...';
+
+      if (mode === 'send-mode') {
+        // === TARGET PHONE LOGIC ===
+        log('[SYS] Requesting Camera/Mic access...');
+        try {
+          localStream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: { ideal: 'environment' } },
+            audio: true
+          });
+          mediaPlayer.srcObject = localStream;
+          log('[MEDIA] Capture stream secured.');
+        } catch (err) {
+          log(`[ERR] Media failed: ${err.message}`);
+          return;
+        }
+
+        const senderPeerId = `${room}-streamer`;
+        peer = new Peer(senderPeerId);
+
+        peer.on('open', (id) => {
+          log(`[CORE] Registered as Streamer: ${id}`);
+          sysStatus.className = 'status-badge online';
+          sysStatus.textContent = 'BROADCASTING';
+        });
+
+        peer.on('call', (call) => {
+          log('[CALL] Incoming monitor link request. Answering...');
+          call.answer(localStream);
+        });
+
+        peer.on('connection', (conn) => {
+          dataConn = conn;
+          log('[DATA] Telemetry pipe established.');
+          iceState.textContent = 'CONNECTED';
+        });
+
+        // Start Geolocation Telemetry Watcher
+        if (navigator.geolocation) {
+          navigator.geolocation.watchPosition((pos) => {
+            const { latitude, longitude, speed, heading, altitude } = pos.coords;
+            if (lastCoords) {
+              totalDistKm += calculateDistance(lastCoords.latitude, lastCoords.longitude, latitude, longitude);
+            }
+            lastCoords = { latitude, longitude };
+
+            const packet = { lat: latitude, lon: longitude, speed, heading, alt: altitude, dist: totalDistKm };
+            updateTelemetryUI(packet);
+
+            if (dataConn && dataConn.open) {
+              dataConn.send(packet);
+              packetCounter++;
+              packetCount.textContent = packetCounter;
+            }
+          }, (err) => log(`[GEO] Error: ${err.message}`), { enableHighAccuracy: true });
+        }
+
+      } else {
+        // === TABLET CONSOLE MONITOR LOGIC ===
+        const receiverPeerId = `${room}-monitor-${Math.floor(Math.random() * 1000)}`;
+        peer = new Peer(receiverPeerId);
+
+        peer.on('open', () => {
+          const targetSenderId = `${room}-streamer`;
+          log(`[CORE] Connecting to feed: ${targetSenderId}`);
+
+          // Connect Data Channel
+          const conn = peer.connect(targetSenderId);
+          conn.on('open', () => {
+            log('[DATA] Telemetry pipe linked.');
+            iceState.textContent = 'CONNECTED';
+          });
+          conn.on('data', (data) => {
+            packetCounter++;
+            packetCount.textContent = packetCounter;
+            updateTelemetryUI(data);
+          });
+
+          // Request Media Call
+          const call = peer.call(targetSenderId, null);
+          call.on('stream', (remoteStream) => {
+            log('[MEDIA] Remote video/audio feed received.');
+            mediaPlayer.srcObject = remoteStream;
+            unmuteBtn.style.display = 'inline-block';
+            sysStatus.className = 'status-badge online';
+            sysStatus.textContent = 'LIVE MONITOR';
+          });
+        });
+
+        unmuteBtn.addEventListener('click', () => {
+          mediaPlayer.muted = false;
+          mediaPlayer.play();
+          unmuteBtn.style.display = 'none';
+          log('[AUDIO] Output unmuted.');
+        });
+      }
+
+      peer.on('error', (err) => {
+        log(`[PEER ERR] ${err.type}: ${err.message}`);
+        sysStatus.className = 'status-badge cold';
+        sysStatus.textContent = 'ERROR';
+      });
+    });
+  </script>
+</body>
+</html>
